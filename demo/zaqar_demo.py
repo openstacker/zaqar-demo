@@ -24,9 +24,11 @@ from oslo_utils import encodeutils
 from oslo_utils import importutils
 
 from aodhclient import client as aodh_client
+from heatclient import client as heat_client
 from keystoneauth1.identity import generic
 from keystoneauth1 import session
-from mistralclient.api import client as mistral_client
+from keystoneclient.v3 import client as keystone_client
+from mistralclient.api.v2 import client as mistral_client
 from zaqarclient.queues import client as zaqar_client
 
 
@@ -243,8 +245,29 @@ class ZaqarDemo(object):
         try:
             self.authenticate(args)
 
+            self.keystone = keystone_client.Client(versioin='3',
+                                                   session=self.session)
+
             self.zaqar = zaqar_client.Client(version=2, session=self.session)
             self.aodh = aodh_client.Client("2", session=self.session)
+
+            # Create Mistral client
+            mistral_srv = self.keystone.services.find(type='workflowv2')
+            mistral_endpoint = self.keystone.endpoints.find(service_id=mistral_srv.id,
+                                                           interface='public')
+            self.mistral_url = mistral_endpoint.url
+
+            self.mistral = mistral_client.Client(mistral_url=mistral_endpoint.url,
+                                                 auth_token=self.session.get_token())
+
+            # Create Heat client
+            heat_srv = self.keystone.services.find(type='orchestration')
+            heat_endpoint = self.keystone.endpoints.find(service_id=heat_srv.id,
+                                                           interface='public')
+            heat_url = heat_endpoint.url.replace('$(project_id)s',
+                                                 self.session.get_project_id())
+            self.heat = heat_client.Client('1', endpoint=heat_url,
+                                           token=self.session.get_token())
 
             self.debug = args.DEBUG
         except Exception:
@@ -291,25 +314,81 @@ class HelpFormatter(argparse.HelpFormatter):
 def do_demo(shell, args):
     # 0. Create stack with Heat include 2 instances
 
+    # 0. Create Mistral workflow
+    try:
+        shell.mistral.workflows.delete('auto_healing')
+    except:
+        pass
+    workflow_yaml = open('./auto_healing.yaml')
+    workflow = shell.mistral.workflows.create(workflow_yaml)
+    print_dict(workflow[0].to_dict())
+
     # 1. Create a queue in Zaqar and get signed info
-    queue = shell.zaqar.queue(args.queue_name)
+    my_queue = shell.zaqar.queue(args.queue_name)
     paths = ["messages", "subscriptions"]
     methods = ['GET', 'PATCH', 'POST', 'PUT']
-    presigned = queue.signed_url(paths=paths, methods=methods)    
+    presigned = my_queue.signed_url(paths=paths, methods=methods)
     print_dict(presigned)
 
     # 2. Create Mistral subscription
+    subscriber = 'trust+' + shell.mistral_url + '/executions'
+    post_data = ('{"input": "$zaqar_message$", "workflow_id": "%s"}' %
+                 workflow[0].id)
+    sub = shell.zaqar.subscription(args.queue_name,
+                                   subscriber=subscriber,
+                                   ttl=3600,
+                                   options={'post_data': post_data})
+    print_dict({'subscriber': sub.subscriber, 'options': sub.options})
+
     
+    #my_queue.post([{'body': {'pre_check': 'fake_instance_id'}}])
+
     # 3. Create email subscription
 
     # 4. Create alarm in Aodh based on above signed queue info
-    alarm_info = {}
+    instance_id = '68549451-986a-4b42-85f7-3fbdb22b367a'
+    actions = ['zaqar://?signature={0}&expires={1}&paths={2}'
+               '&methods={3}&project_id={4}&queue_name={5}' \
+               .format(presigned.signature,
+                       presigned.expires,
+                       presigned.paths,
+                       presigned.methods,
+                       presigned.project_id,
+                       args.queue_name)]
+    alarm_info = {'alarm_actions': actions,
+                  'name': 'auto_healing',
+                  'type': 'event',
+                  "event_rule": {
+                        "event_type": "compute.instance.update",
+                        "query" : [
+                                        {
+                                            "field" : "traits.instance_id",
+                                            "type" : "string",
+                                            "value" : instance_id,
+                                            "op" : "eq",
+                                        },
+                                        {
+                                            "field" : "traits.state",
+                                            "type" : "string",
+                                            "value" : "error",
+                                            "op" : "eq",
+                                        },
+                                    ]
+                        }
+                  }
     alarm = shell.aodh.alarm.create(alarm_info)
+    print_dict(alarm)
 
     # 5. Post fake data into Ceilometer to trigger alarm
 
-    # 6. Verify if the alarm has been forwarded by Zaqar to Mistral
 
+    # 6. Verify if the alarm has been forwarded by Zaqar to Mistral, see if
+    # there is a new execution
+    messages = myqueue.messages()
+    print_list(messages, ['body'])
+
+    executions = shell.mistral.executions.list()
+    print_list(executions, ['id', 'workflow_id', 'workflow_name', 'state'])
     # 7. Verify if Heat has mark the resource as unhealthy
 
     # 8. Verify if the stack has been updated
