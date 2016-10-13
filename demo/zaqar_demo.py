@@ -18,12 +18,16 @@ import prettytable
 import re
 import six
 import sys
+import time
 import traceback
 
 from oslo_utils import encodeutils
 from oslo_utils import importutils
 
+from aodh import messaging
+import oslo_messaging
 from aodhclient import client as aodh_client
+from glanceclient import client as glance_client
 from heatclient import client as heat_client
 from keystoneauth1.identity import generic
 from keystoneauth1 import session
@@ -269,6 +273,7 @@ class ZaqarDemo(object):
             self.heat = heat_client.Client('1', endpoint=heat_url,
                                            token=self.session.get_token())
 
+            self.glance = glance_client.Client('1', session=self.session)
             self.debug = args.DEBUG
         except Exception:
             exc_type, exc_value, exc_traceback = sys.exc_info()
@@ -309,17 +314,40 @@ class HelpFormatter(argparse.HelpFormatter):
         super(HelpFormatter, self).start_section(heading)
 
 
-@arg('--queue-name', type=str, nargs='*', default='beijing',
+@arg('--queue-name', type=str, default='beijing',
      help='Queue name.')
 def do_demo(shell, args):
     # 0. Create stack with Heat include 2 instances
+    try:
+        shell.heat.stacks.delete('auto_healing')
+        time.sleep(10)
+    except:
+        pass
+    stack_yaml = open('./auto_healing_heat.yaml', 'r')
+    stack_resp = shell.heat.stacks.create(stack_name='auto_healing',
+                                          template=stack_yaml.read(),
+                                          parameters={})
+    stack_id = stack_resp['stack']['id']
+    def check_stack():
+        stack = shell.heat.stacks.get(stack_id)
+        return stack.stack_status == 'CREATE_COMPLETE'
+    server_id_map = {}
+    server_name_map = {}
+    if call_until_true(check_stack, 300, 1):
+        stack = shell.heat.stacks.get(stack_id)
+        for output in stack.outputs:
+            if output['output_key'] == 'server_id_map':
+                server_id_map = output['output_value']
+            if output['output_key'] == 'server_name_map':
+                server_name_map = output['output_value']
+    root_statck_id = stack.parameters['OS::stack_id']
 
     # 0. Create Mistral workflow
     try:
         shell.mistral.workflows.delete('auto_healing')
     except:
         pass
-    workflow_yaml = open('./auto_healing.yaml')
+    workflow_yaml = open('./auto_healing_mistral.yaml')
     workflow = shell.mistral.workflows.create(workflow_yaml)
     print_dict(workflow[0].to_dict())
 
@@ -340,21 +368,19 @@ def do_demo(shell, args):
                                    options={'post_data': post_data})
     print_dict({'subscriber': sub.subscriber, 'options': sub.options})
 
-    
-    #my_queue.post([{'body': {'pre_check': 'fake_instance_id'}}])
-
     # 3. Create email subscription
 
     # 4. Create alarm in Aodh based on above signed queue info
-    instance_id = '68549451-986a-4b42-85f7-3fbdb22b367a'
+    instance_id = '359e0916-0811-41f2-833f-bdbbb7f6694e'
     actions = ['zaqar://?signature={0}&expires={1}&paths={2}'
                '&methods={3}&project_id={4}&queue_name={5}' \
-               .format(presigned.signature,
-                       presigned.expires,
-                       presigned.paths,
-                       presigned.methods,
-                       presigned.project_id,
+               .format(presigned['signature'],
+                       presigned['expires'],
+                       ','.join(presigned['paths']),
+                       ','.join(presigned['methods']),
+                       presigned['project'],
                        args.queue_name)]
+
     alarm_info = {'alarm_actions': actions,
                   'name': 'auto_healing',
                   'type': 'event',
@@ -370,7 +396,7 @@ def do_demo(shell, args):
                                         {
                                             "field" : "traits.state",
                                             "type" : "string",
-                                            "value" : "error",
+                                            "value" : "stopped",
                                             "op" : "eq",
                                         },
                                     ]
@@ -379,12 +405,19 @@ def do_demo(shell, args):
     alarm = shell.aodh.alarm.create(alarm_info)
     print_dict(alarm)
 
-    # 5. Post fake data into Ceilometer to trigger alarm
+    # 5. Trigger event to Ceilometer so as to trigger alarm
+    #import random
+    #for i in range(5):
+    #    shell.glance.images.update(instance_id,
+    #                               name='fedora' + str(random.randint(1,1000)))
 
 
     # 6. Verify if the alarm has been forwarded by Zaqar to Mistral, see if
     # there is a new execution
-    messages = myqueue.messages()
+    import pdb
+    pdb.set_trace()
+    time.sleep(5)
+    messages = my_queue.messages()
     print_list(messages, ['body'])
 
     executions = shell.mistral.executions.list()
@@ -392,6 +425,31 @@ def do_demo(shell, args):
     # 7. Verify if Heat has mark the resource as unhealthy
 
     # 8. Verify if the stack has been updated
+
+def fake_error_event():
+    from aodh import service
+    conf = service.prepare_service(argv=[], config_files=[])
+    transport = messaging.get_transport(conf, 'fake://', cache=False)
+    msg_notifier = oslo_messaging.Notifier(
+            transport, topics=['alarm.all'], driver='messaging',
+            publisher_id='test-publisher')
+    event1 = {'event_type': 'compute.instance.update',
+              'traits': ['foo', 'bar'],
+              'message_id': '20d03d17-4aba-4900-a179-dba1281a3451',
+              'generated': '2016-04-23T06:50:21.622739'}
+
+    msg_notifier.sample({}, 'event', event1)
+
+
+def call_until_true(func, duration, sleep_for):
+    now = time.time()
+    timeout = now + duration
+    while now < timeout:
+        if func():
+            return True
+        time.sleep(sleep_for)
+        now = time.time()
+    return False
 
 
 def print_dict(d, max_column_width=80):

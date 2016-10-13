@@ -1,0 +1,21 @@
+---
+version: '2.0'
+auto_healing:
+  description: Workflow for auto heal stack triggered by Zaqar notification
+  type: direct
+  input: # Input parameter declarations
+    - server_id_map: {0}
+    - server_name_map: {1}
+    - stack_id: {2}
+    - root_stack_id: {3}
+    - body
+    - queue_name
+    - Message_Type
+    - ttl
+  tasks:
+    mark_unhealthy:
+      action: resources.mark_unhealthy
+      on-success:
+        - stacks_update
+    stacks_update:
+      action: stacks.update

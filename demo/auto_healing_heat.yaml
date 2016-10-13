@@ -1,0 +1,78 @@
+
+
+heat_template_version: 2016-10-14
+
+parameters:
+  flavor:
+    type: string
+    description: Flavor for the instances to be created
+    default: cirros256
+    constraints:
+      - custom_constraint: nova.flavor
+        description: Must be a flavor known to Nova
+  image:
+    type: string
+    description: >
+      Name or ID of the image to use for the instances.
+    default: cirros-0.3.4-x86_64-uec
+    constraints:
+      - custom_constraint: glance.image
+        description: Must identify an image known to Glance
+  network:
+    type: string
+    description: The network for the VM
+    default: private
+  port:
+    type: number
+    description: The port to reply to requests on
+    default: 8080
+
+resources:
+  servers:
+    type: OS::Heat::AutoScalingGroup
+    properties:
+      resource:
+        type: OS::Nova::Server
+        properties:
+          image: {get_param: image}
+          flavor: {get_param: flavor}
+          networks:
+           - network: {get_param: network}
+          user_data_format: RAW
+          user_data:
+            str_replace:
+              template: |
+                #! /bin/sh -v
+                Body=$(hostname)
+                Response="HTTP/1.1 200 OK\r\nContent-Length: ${#Body}\r\n\r\n$Body"
+                while true ; do echo -e $Response | nc -llp %PORT%; done
+              params:
+                "%PORT%": {get_param: port}
+      min_size: 1
+      desired_capacity: 2
+      max_size: 4
+
+outputs:
+  server_ids:
+    description: A list of server UUIDs to alarm on
+    value: {get_attr: [servers, refs]}
+  ip_addresses:
+    description: A list of server IP addresses
+    value: {get_attr: [servers, outputs_list, first_address]}
+  urls:
+    description: A list of server URLs
+    value:
+      repeat:
+        template:
+          str_replace:
+            template: "http://%IP_ADDR%:%PORT%/"
+            params:
+              "%PORT%": {get_param: port}
+        for_each:
+          "%IP_ADDR%": {get_attr: [servers, outputs_list, first_address]}
+  server_id_map:
+    description: A map of resource names to server UUIDs
+    value: {get_attr: [servers, refs_map]}
+  server_name_map:
+    description: A map of resource names to server names
+    value: {get_attr: [servers, outputs, name]}
