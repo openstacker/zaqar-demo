@@ -20,6 +20,8 @@ import six
 import sys
 import time
 import traceback
+import yaml
+import yaql
 
 from oslo_utils import encodeutils
 from oslo_utils import importutils
@@ -28,12 +30,21 @@ from aodh import messaging
 import oslo_messaging
 from aodhclient import client as aodh_client
 from glanceclient import client as glance_client
+from novaclient import client as nova_client
 from heatclient import client as heat_client
 from keystoneauth1.identity import generic
 from keystoneauth1 import session
 from keystoneclient.v3 import client as keystone_client
 from mistralclient.api.v2 import client as mistral_client
 from zaqarclient.queues import client as zaqar_client
+
+
+environment_template = """
+event_sinks:
+- type: zaqar-queue
+  target: %s
+  ttl: 3600
+"""
 
 
 def arg(*args, **kwargs):
@@ -258,7 +269,7 @@ class ZaqarDemo(object):
             # Create Mistral client
             mistral_srv = self.keystone.services.find(type='workflowv2')
             mistral_endpoint = self.keystone.endpoints.find(service_id=mistral_srv.id,
-                                                           interface='public')
+                                                            interface='public')
             self.mistral_url = mistral_endpoint.url
 
             self.mistral = mistral_client.Client(mistral_url=mistral_endpoint.url,
@@ -274,6 +285,7 @@ class ZaqarDemo(object):
                                            token=self.session.get_token())
 
             self.glance = glance_client.Client('1', session=self.session)
+            self.nova = nova_client.Client('2', sesson=session)
             self.debug = args.DEBUG
         except Exception:
             exc_type, exc_value, exc_traceback = sys.exc_info()
@@ -314,39 +326,54 @@ class HelpFormatter(argparse.HelpFormatter):
         super(HelpFormatter, self).start_section(heading)
 
 
-@arg('--queue-name', type=str, default='beijing',
+@arg('--queue-name', type=str, default='auto_healing',
      help='Queue name.')
+@arg('--stack-name', type=str, default='auto_healing',
+     help='Stack name.')
 def do_demo(shell, args):
-    # 0. Create stack with Heat include 2 instances
-    try:
-        shell.heat.stacks.delete('auto_healing')
-        time.sleep(10)
-    except:
-        pass
+    clean(shell)
+
+    # 0. Create stack with Heat
     stack_yaml = open('./auto_healing_heat.yaml', 'r')
-    stack_resp = shell.heat.stacks.create(stack_name='auto_healing',
+    environment = environment_template % queue_name
+    stack_resp = shell.heat.stacks.create(stack_name=args.stack_name,
                                           template=stack_yaml.read(),
                                           parameters={})
-    stack_id = stack_resp['stack']['id']
+    root_stack_id = stack_resp['stack']['id']
+
     def check_stack():
-        stack = shell.heat.stacks.get(stack_id)
+        stack = shell.heat.stacks.get(root_stack_id)
         return stack.stack_status == 'CREATE_COMPLETE'
+
     server_id_map = {}
     server_name_map = {}
     if call_until_true(check_stack, 300, 1):
-        stack = shell.heat.stacks.get(stack_id)
+        stack = shell.heat.stacks.get(root_stack_id)
         for output in stack.outputs:
             if output['output_key'] == 'server_id_map':
                 server_id_map = output['output_value']
             if output['output_key'] == 'server_name_map':
                 server_name_map = output['output_value']
-    root_statck_id = stack.parameters['OS::stack_id']
 
-    # 0. Create Mistral workflow
-    try:
-        shell.mistral.workflows.delete('auto_healing')
-    except:
-        pass
+    stack_id = shell.heat.resources.list(root_stack_id)[0].physical_resource_id
+
+    # 0. Inject stack info into workflow template
+    wf = yaml.load(open('./auto_healing_mistral.yaml'))
+    for param in wf['auto_healing']['input']:
+        if isinstance(param, dict):
+            if "server_id_map" in param:
+                param['server_id_map'] = dict([(str(k), str(v)) for k, v
+											  in server_id_map.items()])
+            if "server_name_map" in param:
+                param['server_name_map'] = dict([(str(k), str(v)) for k, v
+												in server_name_map.items()])
+            if "stack_id" in param:
+                param['stack_id'] = str(stack_id)
+            if "root_stack_id" in param:
+                param['root_stack_id'] = str(root_stack_id)
+
+    yaml.dump(wf, open('./auto_healing_mistral.yaml', 'w+'))
+    
     workflow_yaml = open('./auto_healing_mistral.yaml')
     workflow = shell.mistral.workflows.create(workflow_yaml)
     print_dict(workflow[0].to_dict())
@@ -362,15 +389,22 @@ def do_demo(shell, args):
     subscriber = 'trust+' + shell.mistral_url + '/executions'
     post_data = ('{"input": "$zaqar_message$", "workflow_id": "%s"}' %
                  workflow[0].id)
-    sub = shell.zaqar.subscription(args.queue_name,
-                                   subscriber=subscriber,
-                                   ttl=3600,
-                                   options={'post_data': post_data})
-    print_dict({'subscriber': sub.subscriber, 'options': sub.options})
+    sub_mistral = shell.zaqar.subscription(args.queue_name,
+                                           subscriber=subscriber,
+                                           ttl=102400,
+                                           options={'post_data': post_data})
+    print_dict({'subscriber': sub_mistral.subscriber,
+                'options': sub_mistral.options})
 
-    # 3. Create email subscription
+	# 3. Create email subscription
+    sub_email = shell.zaqar.subscription(args.queue_name,
+                                         subscriber='mailto:flwang@catalyst.net.nz',
+                                         ttl=102400,
+                                         options={'subject': 'Alarm from stack: %s' % root_stack_id})
+    print_dict({'subscriber': sub_email.subscriber,
+                'options': sub_email.options})
 
-    # 4. Create alarm in Aodh based on above signed queue info
+    # 4. Create alarm in Aodh based on above signed queue and instance info
     instance_id = '359e0916-0811-41f2-833f-bdbbb7f6694e'
     actions = ['zaqar://?signature={0}&expires={1}&paths={2}'
                '&methods={3}&project_id={4}&queue_name={5}' \
@@ -381,42 +415,39 @@ def do_demo(shell, args):
                        presigned['project'],
                        args.queue_name)]
 
-    alarm_info = {'alarm_actions': actions,
-                  'name': 'auto_healing',
-                  'type': 'event',
-                  "event_rule": {
-                        "event_type": "compute.instance.update",
-                        "query" : [
-                                        {
-                                            "field" : "traits.instance_id",
-                                            "type" : "string",
-                                            "value" : instance_id,
-                                            "op" : "eq",
-                                        },
-                                        {
-                                            "field" : "traits.state",
-                                            "type" : "string",
-                                            "value" : "stopped",
-                                            "op" : "eq",
-                                        },
-                                    ]
-                        }
-                  }
-    alarm = shell.aodh.alarm.create(alarm_info)
-    print_dict(alarm)
+    for instance_id in server_id_map.values():
+        alarm_info = {'alarm_actions': actions,
+                      'name': 'auto_healing',
+                      'type': 'event',
+                      'severity': 'critical',
+                      "event_rule": {
+                            "event_type": "compute.instance.update",
+                            "query" : [
+                                            {
+                                                "field" : "traits.instance_id",
+                                                "type" : "string",
+                                                "value" : instance_id,
+                                                "op" : "eq",
+                                            },
+                                            {
+                                                "field" : "traits.state",
+                                                "type" : "string",
+                                                "value" : "stopped",
+                                                "op" : "eq",
+                                            },
+                                        ]
+                            }
+                      }
+        alarm = shell.aodh.alarm.create(alarm_info)
+        print_dict(alarm)
 
     # 5. Trigger event to Ceilometer so as to trigger alarm
-    #import random
-    #for i in range(5):
-    #    shell.glance.images.update(instance_id,
-    #                               name='fedora' + str(random.randint(1,1000)))
-
+    msg_body = {'severity': 'low', 'alarm_name': 'auto_healing', 'current': 'alarm', 'alarm_id': '9b1e5f05-bfa3-4151-a9a9-d18f18ca21a1', 'reason': 'Event <id=809c61c7-0bd9-4082-a88a-5b242ad842fc,event_type=compute.instance.update> hits the query <query=[{"field": "traits.instance_id", "op": "eq", "type": "string", "value": "359e0916-0811-41f2-833f-bdbbb7f6694e"}, {"field": "traits.state", "op": "eq", "type": "string", "value": "stopped"}]>.', 'reason_data': {'type': 'event', 'event': {'event_type': 'compute.instance.update', 'traits': [['state', 1, 'stopped'], ['user_id', 1, '8540af4e98c246e7adb1d2e70c21807d'], ['service', 1, 'compute'], ['disk_gb', 2, 0], ['instance_type', 1, 'cirros256'], ['tenant_id', 1, '870f7fd75a1c4dc49a8091ca99626b88'], ['root_gb', 2, 0], ['ephemeral_gb', 2, 0], ['instance_type_id', 2, 1], ['vcpus', 2, 1], ['memory_mb', 2, 256], ['instance_id', 1, server_id_map.values()[0]], ['host', 1, 'feilong-ThinkPad-X1-Carbon-2nd'], ['request_id', 1, 'req-5a312569-60e0-4282-bf95-2e00ebdf532b'], ['project_id', 1, '870f7fd75a1c4dc49a8091ca99626b88'], ['launched_at', 4, '2016-10-12T21:55:59']], 'message_signature': 'ecedefc4507a03cf5e0e479815e4eee9c4c3c28aacb164ad00d04f242172b65e', 'raw': {}, 'generated': '2016-10-13T04:16:31.672126', 'message_id': '809c61c7-0bd9-4082-a88a-5b242ad842fc'}}, 'previous': 'insufficient data'}
+    my_queue.post([{'body': msg_body}])
 
     # 6. Verify if the alarm has been forwarded by Zaqar to Mistral, see if
     # there is a new execution
-    import pdb
-    pdb.set_trace()
-    time.sleep(5)
+    #time.sleep(5)
     messages = my_queue.messages()
     print_list(messages, ['body'])
 
@@ -425,6 +456,32 @@ def do_demo(shell, args):
     # 7. Verify if Heat has mark the resource as unhealthy
 
     # 8. Verify if the stack has been updated
+
+
+def clean(shell):
+    stacks = shell.heat.stacks.list()
+    for stack in stacks:
+        shell.heat.stacks.delete(stack.id)
+
+    alarms = shell.aodh.alarm.list()
+    for alarm in alarms:
+        shell.aodh.alarm.delete(alarm['alarm_id'])
+
+    workflows = shell.mistral.workflows.list()
+    for workflow in workflows:
+        try:
+            shell.mistral.workflows.delete(workflow.id)
+        except:
+            pass
+
+    queues = shell.zaqar.queues()
+    for queue in queues:
+        queue.delete()
+
+
+def wait_heat_stack_complete(shell):
+    pass
+
 
 def fake_error_event():
     from aodh import service

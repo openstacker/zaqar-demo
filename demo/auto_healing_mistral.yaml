@@ -1,21 +1,22 @@
----
-version: '2.0'
 auto_healing:
   description: Workflow for auto heal stack triggered by Zaqar notification
-  type: direct
-  input: # Input parameter declarations
-    - server_id_map: {0}
-    - server_name_map: {1}
-    - stack_id: {2}
-    - root_stack_id: {3}
-    - body
-    - queue_name
-    - Message_Type
-    - ttl
+  input:
+  - server_id_map: {g4gmoyg3ccqe: 931f9d27-8313-449a-a2f5-459fec3cffdd, ymhtjuixhhly: 824d34f4-5c9a-4989-8123-537fbd8f06f8}
+  - server_name_map: {g4gmoyg3ccqe: au-ing-servers-7tr742ybwrdh-g4gmoyg3ccqe-fwbeomztz2z2,
+      ymhtjuixhhly: au-ing-servers-7tr742ybwrdh-ymhtjuixhhly-lhragjma5tsk}
+  - {stack_id: ff7d060d-59a4-4fa6-8798-61dd805e40d1}
+  - {root_stack_id: b7ad45fb-d430-437b-a782-318f84557580}
+  - body
+  - queue_name
+  - Message_Type
+  - ttl
   tasks:
-    mark_unhealthy:
-      action: resources.mark_unhealthy
-      on-success:
-        - stacks_update
-    stacks_update:
-      action: stacks.update
+    resources_mark_unhealthy:
+      action: heat.resources_mark_unhealthy stack_id=<% $.stack_id %> resource_name=<%
+        dict($.server_id_map.items().select([$[1],$[0]]))[$.body.reason_data.event.traits.where($[0]
+        = 'instance_id').select($[2]).first()] %> mark_unhealthy=true resource_status_reason='Marked
+        by alarm'
+      on-success: [stacks_update]
+    stacks_update: {action: heat.stacks_update stack_id=<% $.root_stack_id %> existing=true}
+  type: direct
+version: '2.0'
