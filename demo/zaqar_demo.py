@@ -478,6 +478,7 @@ def do_demo(shell, args):
                       'name': 'auto_healing',
                       'type': 'event',
                       'severity': 'critical',
+                      'repeat_actions': True,
                       "event_rule": {
                             "event_type": "compute.instance.update",
                             "query" : [
@@ -503,6 +504,7 @@ def do_demo(shell, args):
     # 5. Trigger event to Ceilometer so as to trigger alarm
     #msg_body = {'severity': 'low', 'alarm_name': 'auto_healing', 'current': 'alarm', 'alarm_id': '9b1e5f05-bfa3-4151-a9a9-d18f18ca21a1', 'reason': 'Event <id=809c61c7-0bd9-4082-a88a-5b242ad842fc,event_type=compute.instance.update> hits the query <query=[{"field": "traits.instance_id", "op": "eq", "type": "string", "value": "359e0916-0811-41f2-833f-bdbbb7f6694e"}, {"field": "traits.state", "op": "eq", "type": "string", "value": "stopped"}]>.', 'reason_data': {'type': 'event', 'event': {'event_type': 'compute.instance.update', 'traits': [['state', 1, 'stopped'], ['user_id', 1, '8540af4e98c246e7adb1d2e70c21807d'], ['service', 1, 'compute'], ['disk_gb', 2, 0], ['instance_type', 1, 'cirros256'], ['tenant_id', 1, '870f7fd75a1c4dc49a8091ca99626b88'], ['root_gb', 2, 0], ['ephemeral_gb', 2, 0], ['instance_type_id', 2, 1], ['vcpus', 2, 1], ['memory_mb', 2, 256], ['instance_id', 1, server_id_map.values()[0]], ['host', 1, 'feilong-ThinkPad-X1-Carbon-2nd'], ['request_id', 1, 'req-5a312569-60e0-4282-bf95-2e00ebdf532b'], ['project_id', 1, '870f7fd75a1c4dc49a8091ca99626b88'], ['launched_at', 4, '2016-10-12T21:55:59']], 'message_signature': 'ecedefc4507a03cf5e0e479815e4eee9c4c3c28aacb164ad00d04f242172b65e', 'raw': {}, 'generated': '2016-10-13T04:16:31.672126', 'message_id': '809c61c7-0bd9-4082-a88a-5b242ad842fc'}}, 'previous': 'insufficient data'}
     #my_queue.post([{'body': msg_body}])
+    #shell.nova.servers.stop(server_id_map.values()[0])
     
 
     # 6. Verify if the alarm has been forwarded by Zaqar to Mistral, see if
@@ -565,12 +567,9 @@ def init_env(shell):
 
     stacks = list(shell.heat.stacks.list())
     while stacks:
-        data = json.loads(shell.zaqar_ws.recv())['body']['payload']
-        if data['resource_type'] == 'OS::Heat::Stack':
-            if data['resource_status'] != 'DELETE_IN_PROGRESS':
-                print data['resource_status_reason']
-                break
+        time.sleep(1)
         stacks = list(shell.heat.stacks.list())
+
     if prompt_yes_no('Environment is clean now. Ready to go?') == False:
         return
 
