@@ -1,11 +1,11 @@
 auto_healing:
   description: Workflow for auto heal stack triggered by Zaqar notification
   input:
-  - server_id_map: {g4gmoyg3ccqe: 931f9d27-8313-449a-a2f5-459fec3cffdd, ymhtjuixhhly: 824d34f4-5c9a-4989-8123-537fbd8f06f8}
-  - server_name_map: {g4gmoyg3ccqe: au-ing-servers-7tr742ybwrdh-g4gmoyg3ccqe-fwbeomztz2z2,
-      ymhtjuixhhly: au-ing-servers-7tr742ybwrdh-ymhtjuixhhly-lhragjma5tsk}
-  - {stack_id: ff7d060d-59a4-4fa6-8798-61dd805e40d1}
-  - {root_stack_id: b7ad45fb-d430-437b-a782-318f84557580}
+  - server_id_map: {dcu7sa65dm22: 567b0147-41e3-4987-be2c-05f8b76068f9, otkgth4y3pl6: 2051000d-9a2a-49ac-ba3f-36829b881d99}
+  - server_name_map: {dcu7sa65dm22: au-ing-servers-ekqwp3emrjrg-dcu7sa65dm22-immkgerxztmc,
+      otkgth4y3pl6: au-ing-servers-ekqwp3emrjrg-otkgth4y3pl6-33idw6sw7vm4}
+  - {stack_id: 0396adc9-54ad-4700-acbb-ebb57ed6164f}
+  - {root_stack_id: 74bba387-e5d9-4f6a-97a5-30a0cc1c0b14}
   - body
   - queue_name
   - Message_Type
