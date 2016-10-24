@@ -569,6 +569,8 @@ def init_env(shell):
     while stacks:
         time.sleep(1)
         stacks = list(shell.heat.stacks.list())
+        if not stacks:
+            break
 
     if prompt_yes_no('Environment is clean now. Ready to go?') == False:
         return
