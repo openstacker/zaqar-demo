@@ -573,7 +573,7 @@ def init_env(shell):
             break
 
     if prompt_yes_no('Environment is clean now. Ready to go?') == False:
-        return
+        sys.exit()
 
 
 def fake_error_event():
