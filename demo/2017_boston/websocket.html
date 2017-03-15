@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+
+<html>
+    <head>
+        <title>Zaqar WebSocket example</title>
+        <meta charset='utf-8' />
+        <link rel='stylesheet'  href='http://yui.yahooapis.com/pure/0.6.0/pure-nr-min.css' />
+        <script type='text/javascript' src='http://code.jquery.com/jquery-2.1.4.min.js'></script>
+        <!--[if lte IE 9]>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/es5-shim/4.1.10/es5-shim.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/json3/3.3.2/json3.min.js"></script>
+        <![endif]-->
+        <script src="https://rawgithub.com/kawanet/msgpack-lite/master/dist/msgpack.min.js"></script>
+        <script src="https://colorlib.com/polygon/vendors/ion.rangeSlider/js/ion.rangeSlider.min.js"></script>
+        <script src="https://colorlib.com/polygon/vendors/bootstrap/dist/js/bootstrap.min.js"></script>
+        <script src="https://d3js.org/d3.v3.min.js"></script>
+        <script src="http://c3js.org/js/c3.min-4c5bef8f.js"></script>
+
+        <!-- Load c3.css -->
+        <link href="http://c3js.org/css/c3-b03125fa.css" rel="stylesheet" type="text/css">
+        <link href="https://colorlib.com/polygon/vendors/normalize-css/normalize.css" rel="stylesheet"></link>
+        <link href="https://colorlib.com/polygon/build/css/custom.min.css" rel="stylesheet"></link>
+        <link href="https://colorlib.com/polygon/vendors/ion.rangeSlider/css/ion.rangeSlider.css" rel="stylesheet"></link>
+        <link href="https://colorlib.com/polygon/vendors/ion.rangeSlider/css/ion.rangeSlider.skinFlat.css" rel="stylesheet"></link>
+        <link href="https://colorlib.com/polygon/vendors/bootstrap/dist/css/bootstrap.min.css" rel="stylesheet"></link>
+        <script type='text/javascript'>
+        // Parameters:
+        var username = 'admin';
+        var password = 'passw0rd';
+        var server_url = 'ws://localhost:9000/';
+        var project_id = 'ebb7bf85f02743d398c019e89af3e38f';
+        var client_id = '31209ff3-ba03-4cec-b4ca-655f4899f8f4';
+        var send_binary = true;
+
+        var socket = new WebSocket(server_url);
+        socket.binaryType = 'arraybuffer';
+
+        if (send_binary == true) {
+            // Use MessagePack(binary) for encoding messages
+            encode = function(data) {
+                return msgpack.encode(data);
+            }
+        } else {
+            // Use JSON(text) for encoding messages
+            encode = function(data) {
+                return JSON.stringify(data);
+            }
+        }
+        msgpack_decode = function(enc_data) {
+            return msgpack.decode(new Uint8Array(enc_data));
+        }
+        json_decode = function(enc_data) {
+            return JSON.parse(enc_data);
+        }
+        add_connection_info = function(msg) {
+            msg += ". Using parameters: Server URL: " + server_url;
+            msg += ". Project ID: " + project_id;
+            msg += ". Client ID: " + client_id;
+            msg += ". Binary communication: " + send_binary;
+            return msg
+        }
+        log_info = function(msg) {
+            var node = document.createElement('li');
+            var date = new Date().toUTCString();
+            msg = date + " " + msg;
+            node.appendChild(document.createTextNode(msg));
+            $('#log').append(node);
+        }
+        socket.onopen = function(evt) {
+            msg = "Connection opened";
+            msg = add_connection_info(msg);
+            log_info(msg);
+        }
+        socket.onclose = function(evt) {
+            msg = "Connection closed";
+            log_info(msg);
+        }
+        socket.onerror = function(evt) {
+            msg = "Connection error";
+            msg = add_connection_info(msg);
+            log_info(msg);
+        }
+        socket.onmessage = function(evt) {
+            if (evt.data instanceof ArrayBuffer) {
+                // Received payload in MessagePack(binary) format
+                var data = msgpack_decode(evt.data);
+            }
+            if (typeof evt.data === "string") {
+                // Received payload in JSON(text) format
+                var data = json_decode(evt.data);
+            }
+            if ('request' in data && 'headers' in data) {
+                // Response received
+                var action = data["request"]["action"];
+                msg = "action: " + action;
+                msg += " status: " + data["headers"]["status"];
+                msg += " body: " + JSON.stringify(data["body"]);
+                log_info(msg);
+                if (action == 'queue_list') {
+                    var queues = data['body']['queues'];
+                    display_queues(queues);
+                } else if (action == 'message_list') {
+                    var messages = data['body']['messages'];
+                    display_messages(messages);
+                } else if (action == 'queue_create' || action == 'queue_delete') {
+                    list_queues();
+                } else if (action == 'authenticate' && data["headers"]["status"] == 200) {
+                    list_queues();
+                } else if (action == 'message_post' || action == 'message_delete') {
+                   list_messages();
+                }
+            } else {
+                // Can be notification or unexpected data
+                if(data.hasOwnProperty('body')){
+                    msg = "notification: " + JSON.stringify(data);
+                    log_info(msg)
+                    list_messages();
+                } else {
+                    msg = "unexpected data: " + JSON.stringify(data);
+                    log_info(msg)
+                }
+            }
+        }
+        login = function() { 
+            data = {
+                'auth': {
+                    'identity': {
+                        'methods': ['password'],
+                        'password': {
+                            'user': {
+                                'name': username,
+                                'domain': {'id': 'default'},
+                                'password': password
+                            }
+                        }
+                    }
+                }
+            }
+            $.ajax({
+                'type': 'POST',
+                'url': 'http://localhost:5000/v3/auth/tokens',
+                'data': JSON.stringify(data),
+                'contentType': 'application/json',
+                'dataType': 'json',
+                'success': function(data, code, response) {
+                    var token = response.getResponseHeader('X-Subject-Token')
+                    if (token == null){
+                        log_info("Connected to Keystone, but no 'X-Subject-Token' "
+                        + "header was provided. Keystone's CORS filter is probably "
+                        + "not configured to expose this header.");
+                    } else {
+                        log_info("Got token from Keystone. " +
+                        "Sending authentication request to Zaqar.");
+                        var msg = {'action': 'authenticate',
+                                   'headers': {'X-Auth-Token': token,
+                                               'Client-ID': client_id,
+                                               'X-Project-ID': project_id}}
+                        socket.send(encode(msg));
+                     };
+                },
+                'error': function(data, code, errorThrown) {
+                    if (errorThrown) {
+                        log_info("Keystone error: " + errorThrown);
+                    } else {
+                        log_info("Failed to connect to Keystone. Keystone is either" +
+                        " offline, or CORS is not enabled in Keystone.");
+                    }
+
+                }
+            });
+            return false;
+        }
+        send_message = function(action, body) {
+            var msg = {'action': action,
+                       'headers': {'Client-ID': client_id, 'X-Project-ID':
+                       project_id}};
+            if (body) {
+                msg['body'] = body;
+            };
+            socket.send(encode(msg));
+        }
+        list_queues = function() {
+            send_message('queue_list');
+        }
+        create_queue = function(frm) {
+            send_message('queue_create', {'queue_name': frm['queue'].value});
+            return false;
+        }
+        get_selected_queue = function() {
+            var queue_select = $('#queue_list');
+            return queue_select.val();
+        }
+        display_queues = function(queues) {
+            var queue_select = $('#queue_list');
+            queue_select.empty();
+            $.each(queues, function(idx, queue) {
+                queue_select.append('<option>' + queue.name + '</option>');
+            });
+        }
+        display_messages = function(messages) {
+            var table_body = $('#message_list tbody');
+            table_body.empty();
+            $.each(messages, function(idx, message) {
+                table_body.append('<tr><td>' + message.age + '</td><td>' + message.body + '</td><td>' + message.ttl + '</td><td><button class=\'pure-button\' onclick=\'delete_message("' + message.id + '")\'>Delete</button></td></tr>');
+            });
+        }
+        delete_queue = function() {
+            send_message('queue_delete', {'queue_name': get_selected_queue()});
+        }
+        list_messages = function() {
+            send_message('message_list', {'queue_name': get_selected_queue(), 'echo': true});
+        }
+        queue_message = function(frm) {
+            var body = frm['body'].value;
+            var ttl = parseInt(frm['ttl'].value);
+            send_message('message_post', {'queue_name': get_selected_queue(), 'messages': [{'body': body, 'ttl': ttl}]});
+            return false;
+        }
+        post_message = function() {
+            var body = "hello";
+            var ttl = 3600;
+            send_message('message_post', {'queue_name': get_selected_queue(), 'messages': [{'body': body, 'ttl': ttl}]});
+            return false;
+        }
+        delete_message = function(message_id) {
+            send_message('message_delete', {'queue_name': get_selected_queue(), 'message_id': message_id});
+        }
+        subscribe_queue = function() {
+            send_message('subscription_create', {'queue_name': get_selected_queue(), 'ttl': 3600});
+        }
+        </script>
+    </head>
+    <body>
+        <div>
+          <div class="col-md-12 col-sm-12 col-xs-12">
+            <div class="x_title">
+              <h4>Dashboard</h4>
+              <div class="clearfix"></div>
+            </div>
+            <div>
+            <div class="col-md-3 col-xs-12"><div id="producers_chart"></div></div>
+            <div class="col-md-6 col-xs-12"><div id="backlog_chart" height="100px"></div></div>
+            <div class="col-md-3 col-xs-12"><div id="consumers_chart"></div></div>
+            </div>
+        </div>
+
+        <div>
+          <div class="col-md-12 col-sm-12 col-xs-12">
+            <div class="x_title">
+              <h4>Controller</h4>
+              <div class="clearfix"></div>
+            </div>
+
+            <div class="row grid_slider">
+              <div class="col-md-6 col-sm-6 col-xs-12">
+                <p>Producers</p>
+                <input readonly="" class="irs-hidden-input" id="producers" value="" name="producers" type="text" style="display:none">
+              </div>
+              <div class="col-md-6 col-sm-6 col-xs-12">
+                <p>Consumers</p>
+                <input readonly="" class="irs-hidden-input" id="consumers" value="" name="consumers" type="text" style="display:none">
+              </div>
+              <div class="col-md-6 col-sm-6 col-xs-12">
+                <p>Producer Speed</p>
+                <input readonly="" class="irs-hidden-input" id="producer_speed" value="" name="producer_speed" type="text" style="display:none">
+              </div>
+              <div class="col-md-6 col-sm-6 col-xs-12">
+                <p>Consumer Speed</p>
+                <input readonly="" class="irs-hidden-input" id="consumer_speed" value="" name="consumer_speed" type="text" style="display:none">
+              </div>
+              <div class="col-md-6 col-sm-6 col-xs-12">
+                <p>Batch Size</p>
+                <input readonly="" class="irs-hidden-input" id="producer_batch_size" value="" name="producer_batch_size" type="text" style="display:none">
+              </div>
+              <div class="col-md-6 col-sm-6 col-xs-12">
+                <p>Batch Size</p>
+                <input readonly="" class="irs-hidden-input" id="consumer_batch_size" value="" name="consumer_batch_size" type="text" style="display:none">
+              </div> 
+            </div>
+          </div>
+        </div>
+        <div>
+            <div class="col-md-12 col-sm-12 col-xs-12">
+                <div class="x_title">
+                  <h4>Logs</h4>
+                  <div class="clearfix"></div>
+                </div>
+                <div class="x_content">
+                    <ul id="log" class="to_do"></ul>
+                </div>
+            </div>
+        </div>
+<script>
+    var producers = 0
+    var producer_batch_size = 1
+    var backlog_chart
+    var producers_chart
+    var consumers_chart
+
+    $(document).ready(function () {
+        login($("#login_form"));
+        $("#producers").ionRangeSlider({grid: true, min: 0, max: 100, from: 0});
+        $("#producer_speed").ionRangeSlider({
+            grid: true,
+            from: 0,
+            values: [
+                "very slow", "slow",
+                "fast", "very fast"
+            ]
+        });
+        $("#producer_batch_size").ionRangeSlider({grid: true, min: 1, max: 10, from: 1});
+
+        $("#consumers").ionRangeSlider({grid: true, min: 0, max: 100, from: 0});
+        $("#consumer_speed").ionRangeSlider({
+            grid: true,
+            from: 0,
+            values: [
+                "very slow", "slow",
+                "fast", "very fast"
+            ]
+        });
+        $("#consumer_batch_size").ionRangeSlider({grid: true, min: 1, max: 10, from: 1});
+        $("#producers").change(function() {
+            producers = $("#producers").val();
+            log_info(producers);
+            backlog_chart.load({
+                columns: [
+                  ['messages', 300, 100, 250, 150, 300, 150, 500, 302],
+                ]
+            });
+        });
+
+        backlog_chart = c3.generate({
+            bindto: "#backlog_chart",
+            legend: {
+              show: true
+            },
+            data: {
+                columns: [
+                    ['messages', 300, 350, 300, 1000, 10000, 1000],
+                    ['time', '2013-01-01', '2013-01-02', '2013-01-03', '2013-01-04', '2013-01-05', '2013-01-06']
+                ],
+                x: "time",
+                types: {
+                    messages: 'area-spline',
+                    // 'line', 'spline', 'step', 'area', 'area-step' are also available to stack
+                }
+            },
+            axis: {
+                x: {
+                    type: 'timeseries',
+                    tick: {
+                        format: '%y-%m-%d'
+                    }
+                }
+            }
+        });
+
+        producers_chart = c3.generate({
+            bindto: "#producers_chart",
+            data: {
+                columns: [
+                    ['data', 38]
+                ],
+                type: 'gauge',
+                onclick: function (d, i) { console.log("onclick", d, i); },
+                onmouseover: function (d, i) { console.log("onmouseover", d, i); },
+                onmouseout: function (d, i) { console.log("onmouseout", d, i); }
+            },
+            gauge: {
+                label: {
+                    format: function(value, ratio) {
+                        return value;
+                    },
+                    show: false // to turn off the min/max labels.
+                },
+            max: 1000, // 100 is default
+            units: '',
+            width: 50 // for adjusting arc thickness
+            },
+            color: {
+                pattern: ['#FF0000', '#F97600', '#F6C600', '#60B044'], // the three color levels for the percentage values.
+                threshold: {
+                    // unit: 'value', // percentage is default
+                    // max: 200, // 100 is default
+                    values: [30, 60, 90, 1000]
+                }
+            },
+            size: {
+                height: 180
+            }
+        });
+
+        consumers_chart = c3.generate({
+            bindto: "#consumers_chart",
+            data: {
+                columns: [
+                    ['data', 72]
+                ],
+                type: 'gauge',
+                onclick: function (d, i) { console.log("onclick", d, i); },
+                onmouseover: function (d, i) { console.log("onmouseover", d, i); },
+                onmouseout: function (d, i) { console.log("onmouseout", d, i); }
+            },
+            gauge: {
+                label: {
+                    format: function(value, ratio) {
+                        return value;
+                    },
+                    show: false // to turn off the min/max labels.
+                },
+            max: 1000, // 100 is default
+            units: '',
+            width: 50 // for adjusting arc thickness
+            },
+            color: {
+                pattern: ['#FF0000', '#F97600', '#F6C600', '#60B044'], // the three color levels for the percentage values.
+                threshold: {
+                    // unit: 'value', // percentage is default
+                    // max: 200, // 100 is default
+                    values: [30, 60, 90, 1000]
+                }
+            },
+            size: {
+                height: 180
+            }
+        });
+    });
+</script>
+
+    </body>
+</html>

@@ -1,5 +1,9 @@
-Zaqar Demo for OpenStack Barcelona Summit
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Zaqar Demo for OpenStack Summit
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+2016 Barcelona Summit Demo
+==========================
 
 How to set the test environment?
 
@@ -14,3 +18,15 @@ to /etc/ceilometer/event_pipeline.yaml
 
 2. We're using Zaqar's websocket and wsgi transports, so they need to be
 enabled both. Luckily, it's default in devstack.
+
+2017 Boston Summit Demo
+=======================
+
+1. Running the websocket.html under your apache server
+
+2. Disable the CORS of your browser. And please use Firefox with cors injector addon.
+See https://github.com/fredericlb/Force-CORS/releases
+
+3. After enabled the cors injector, please use below value for its "Headers to inject" config:
+ 
+  Access-Control-Allow-Origin *|Access-Control-Allow-Methods POST,GET|Access-Control-Expose-Headers X-Subject-Token,Vary
